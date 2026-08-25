@@ -13,21 +13,31 @@ JSON array with the very same fields:
       "expires": "2026-10-27T22:17:21"
     }
 
-It is meant to be called by a Zabbix agent (active) UserParameter; the Zabbix
-server reads the JSON directly. Nothing is written to disk.
+Scanning is decoupled from serving so the Zabbix agent never blocks:
 
-With --discovery it instead prints a Zabbix low-level discovery document
-({"data": [{"{#DOMAIN}": "..."}]}) so the server can auto-create per-domain
-items and triggers.
+    --scan       run nmap against every domain and atomically write the JSON
+                 array to CACHE_FILE. Meant to run periodically (cron / loop),
+                 NOT from the agent.
+    (no args)    print the cached JSON array (the `tls.certs.raw` item). This
+                 only reads CACHE_FILE, so it returns instantly and never hits
+                 the agent's Timeout.
+    --discovery  print a Zabbix low-level discovery document
+                 ({"data": [{"{#DOMAIN}": "..."}]}) so the server can
+                 auto-create per-domain items and triggers.
+
+This split fixes the "Timeout occurred while gathering data" error: the slow
+nmap work happens out of band, and the agent only reads a file.
 
 Configuration is via environment variables only (safe for a public repo):
 
     DOMAINS_FILE   path to newline-separated domains (default /config/domains.txt)
+    CACHE_FILE     where --scan writes / readers read (default /var/cache/tlsmonitor/tls_certs.json)
     WARNING_DAYS   status becomes WARNING under this many days left (default 15)
     MAX_RETRIES    nmap attempts per domain (default 3)
     RETRY_DELAY    seconds between retries (default 2)
     DEFAULT_PORT   port scanned when a domain has none (default 443)
     NMAP_BIN       nmap executable (default "nmap")
+    MAX_WORKERS    parallel nmap scans during --scan (default 8)
 """
 import json
 import os
@@ -35,7 +45,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 # nmap prints e.g.:  "| ssl-cert: ... Not valid after:  2026-10-27T22:17:21"
@@ -132,39 +144,99 @@ def check_domain(entry: str, cfg: dict) -> dict:
     return result
 
 
+def scan_all(domains: list[str], cfg: dict) -> list[dict]:
+    """Scan every domain in parallel and return the cert.sh-compatible list.
+
+    Order is preserved so the discovery list and the raw report stay aligned.
+    """
+    workers = max(1, min(cfg["max_workers"], len(domains) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda entry: check_domain(entry, cfg), domains))
+
+
+def write_cache(path: str, results: list[dict]) -> None:
+    """Atomically write the JSON array so readers never see a partial file."""
+    payload = json.dumps(results)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tls_certs.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def read_cache(path: str) -> str:
+    """Return the cached JSON array text, or an empty array if not yet scanned."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read().strip() or "[]"
+    except OSError:
+        return "[]"
+
+
 def main() -> int:
     cfg = {
         "domains_file": env_str("DOMAINS_FILE", "/config/domains.txt"),
+        "cache_file": env_str("CACHE_FILE", "/var/cache/tlsmonitor/tls_certs.json"),
         "warning_days": env_int("WARNING_DAYS", 15),
         "max_retries": env_int("MAX_RETRIES", 3),
         "retry_delay": env_int("RETRY_DELAY", 2),
         "default_port": env_int("DEFAULT_PORT", 443),
+        "max_workers": env_int("MAX_WORKERS", 8),
         "nmap_bin": env_str("NMAP_BIN", "nmap"),
     }
 
-    discovery = "--discovery" in sys.argv[1:]
+    args = sys.argv[1:]
+    discovery = "--discovery" in args
+    scan = "--scan" in args
 
+    # Readers (agent side) only touch the cache file, so they return instantly.
+    if not scan:
+        if discovery:
+            try:
+                domains = load_domains(cfg["domains_file"])
+            except OSError as exc:
+                print(
+                    f"ERROR: cannot read domains file {cfg['domains_file']}: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            data = {"data": [{"{#DOMAIN}": d} for d in domains]}
+            json.dump(data, sys.stdout)
+            sys.stdout.write("\n")
+            return 0
+
+        sys.stdout.write(read_cache(cfg["cache_file"]))
+        sys.stdout.write("\n")
+        return 0
+
+    # Scanner (out of band): do the slow nmap work and refresh the cache.
     try:
         domains = load_domains(cfg["domains_file"])
     except OSError as exc:
         print(f"ERROR: cannot read domains file {cfg['domains_file']}: {exc}", file=sys.stderr)
         return 1
 
-    # Low-level discovery: just the list of domains, no scanning needed.
-    if discovery:
-        data = {"data": [{"{#DOMAIN}": d} for d in domains]}
-        json.dump(data, sys.stdout)
-        sys.stdout.write("\n")
-        return 0
-
     if shutil.which(cfg["nmap_bin"]) is None:
         print(f"ERROR: nmap not found ({cfg['nmap_bin']})", file=sys.stderr)
         return 1
 
-    results = [check_domain(entry, cfg) for entry in domains]
+    results = scan_all(domains, cfg)
 
-    json.dump(results, sys.stdout)
-    sys.stdout.write("\n")
+    try:
+        write_cache(cfg["cache_file"], results)
+    except OSError as exc:
+        print(f"ERROR: cannot write cache file {cfg['cache_file']}: {exc}", file=sys.stderr)
+        return 1
+
     return 0
 
 
