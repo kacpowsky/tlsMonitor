@@ -14,25 +14,53 @@ zabbix_export:
         derived from a single master item via dependent items + JSONPath.
       groups:
         - name: Templates/Applications
+      macros:
+        - macro: '{$TLS.CHECK.INTERVAL}'
+          value: 5m
+          description: 'How often the full cert scan (master item) runs.'
+        - macro: '{$TLS.DISCOVERY.INTERVAL}'
+          value: 5m
+          description: 'How often domains are (re)discovered.'
+        - macro: '{$TLS.DAYS.WARN}'
+          value: '15'
+          description: 'Warn when fewer than this many days remain before expiry.'
+        - macro: '{$TLS.DAYS.CRIT}'
+          value: '7'
+          description: 'High severity when fewer than this many days remain.'
+        - macro: '{$TLS.NODATA}'
+          value: 15m
+          description: 'Alert if the raw report item receives no data for this long.'
       items:
         - uuid: e30c0f08ddcf4b208e33ba0eead08ff6
           name: 'TLS certificates raw report'
           type: ZABBIX_ACTIVE
           key: tls.certs.raw
-          delay: 30m
-          history: '0'
+          delay: '{$TLS.CHECK.INTERVAL}'
+          history: 1h
           trends: '0'
           value_type: TEXT
           description: 'Full cert.sh-compatible JSON array for all monitored domains.'
           tags:
             - tag: component
               value: tls
+          triggers:
+            - uuid: c53c9deaaa834cc6a1fe971ce064ad50
+              expression: 'nodata(/TLS Monitor by Zabbix agent active/tls.certs.raw,{$TLS.NODATA})=1'
+              name: 'TLS monitor is not sending data'
+              priority: HIGH
+              description: |
+                The raw report item has not received data for {$TLS.NODATA}.
+                The agent/pod is likely down or cannot reach the Zabbix server,
+                so certificate expiry is NOT being monitored.
+              tags:
+                - tag: component
+                  value: tls
       discovery_rules:
         - uuid: c5a9ac9096af441d93e19e5576fb8638
           name: 'TLS domain discovery'
           type: ZABBIX_ACTIVE
           key: tls.certs.discovery
-          delay: 1h
+          delay: '{$TLS.DISCOVERY.INTERVAL}'
           description: 'Discovers monitored domains from check_certs.py --discovery.'
           item_prototypes:
             - uuid: 73a2b443343d4116b348da23e4b55c79
@@ -90,11 +118,50 @@ zabbix_export:
               tags:
                 - tag: domain
                   value: '{#DOMAIN}'
-            - uuid: 629111496f324f3484f6831a55700df6
-              expression: 'last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])="WARNING"'
-              name: 'TLS certificate expiring soon for {#DOMAIN}'
+            - uuid: 67dfc5d7e299425ea61a7415ed6c9159
+              expression: |
+                last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])<>"ERROR" and
+                last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])<0
+              name: 'TLS certificate EXPIRED for {#DOMAIN}'
+              priority: DISASTER
+              description: 'The certificate expiry date is in the past (days_left < 0).'
+              tags:
+                - tag: domain
+                  value: '{#DOMAIN}'
+            - uuid: 415bf91b7bf643788d019028f1bc5e50
+              expression: |
+                last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])<>"ERROR" and
+                last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])>=0 and
+                last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])<{$TLS.DAYS.CRIT}
+              name: 'TLS certificate expires in < {$TLS.DAYS.CRIT} days for {#DOMAIN}'
+              priority: HIGH
+              description: 'Fewer than {$TLS.DAYS.CRIT} days remain before the certificate expires.'
+              dependencies:
+                - name: 'TLS certificate EXPIRED for {#DOMAIN}'
+                  expression: |
+                    last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])<>"ERROR" and
+                    last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])<0
+              tags:
+                - tag: domain
+                  value: '{#DOMAIN}'
+            - uuid: 65651f5e09fb465dabcc89eaad1d1121
+              expression: |
+                last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])<>"ERROR" and
+                last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])>={$TLS.DAYS.CRIT} and
+                last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])<{$TLS.DAYS.WARN}
+              name: 'TLS certificate expires in < {$TLS.DAYS.WARN} days for {#DOMAIN}'
               priority: WARNING
-              description: 'Certificate is within WARNING_DAYS of expiry (or already expired).'
+              description: 'Fewer than {$TLS.DAYS.WARN} days remain before the certificate expires.'
+              dependencies:
+                - name: 'TLS certificate expires in < {$TLS.DAYS.CRIT} days for {#DOMAIN}'
+                  expression: |
+                    last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])<>"ERROR" and
+                    last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])>=0 and
+                    last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])<{$TLS.DAYS.CRIT}
+                - name: 'TLS certificate EXPIRED for {#DOMAIN}'
+                  expression: |
+                    last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])<>"ERROR" and
+                    last(/TLS Monitor by Zabbix agent active/tls.cert.days_left[{#DOMAIN}])<0
               tags:
                 - tag: domain
                   value: '{#DOMAIN}'
