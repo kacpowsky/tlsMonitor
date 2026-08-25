@@ -15,8 +15,10 @@ RUN apk add --no-cache python3 nmap nmap-scripts
 COPY check_certs.py /usr/local/bin/check_certs.py
 RUN chmod 0755 /usr/local/bin/check_certs.py
 
-# Zabbix agent UserParameters (mounted into the agent include dir).
-COPY zabbix/userparameter_tls_monitor.conf /etc/zabbix/zabbix_agent2.d/tls_monitor.conf
+# Zabbix agent UserParameters. The image's entrypoint configures the agent to
+# Include /etc/zabbix/zabbix_agentd.d/*.conf (NOT zabbix_agent2.d/*.conf, which
+# is only scanned for plugins.d), so the UserParameter file must live here.
+COPY zabbix/userparameter_tls_monitor.conf /etc/zabbix/zabbix_agentd.d/tls_monitor.conf
 
 # Default domains file location (overridden by the ConfigMap mount at /config).
 ENV DOMAINS_FILE=/config/domains.txt \
