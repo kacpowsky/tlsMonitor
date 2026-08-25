@@ -1,0 +1,20 @@
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local data (real domains come from a ConfigMap, not the repo)
+domains.txt
+domains.local.txt
+
+# Local example/config with environment-specific values (not for the repo)
+example/
+
+# Never commit env files anywhere in the tree
+.env
+*.env
+**/.env

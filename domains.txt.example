@@ -1,0 +1,5 @@
+# One domain per line. Optionally "host:port" (defaults to 443).
+# Lines starting with '#' are ignored. Duplicates are removed.
+example.com
+cloudflare.com
+github.com:443

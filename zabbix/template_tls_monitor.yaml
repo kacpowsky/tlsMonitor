@@ -1,0 +1,100 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: b60c1784d7fd4d9688c9aca2646a08c2
+      name: Templates/Applications
+  templates:
+    - uuid: a0b02aed734b48cd96022b26fec4bba6
+      template: 'TLS Monitor by Zabbix agent active'
+      name: 'TLS Monitor by Zabbix agent active'
+      description: |
+        Monitors TLS certificate expiry for a list of domains via check_certs.py
+        (cert.sh-compatible JSON) exposed through Zabbix agent active
+        UserParameters. Domains are auto-discovered (LLD); per-domain values are
+        derived from a single master item via dependent items + JSONPath.
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: e30c0f08ddcf4b208e33ba0eead08ff6
+          name: 'TLS certificates raw report'
+          type: ZABBIX_ACTIVE
+          key: tls.certs.raw
+          delay: 30m
+          history: '0'
+          trends: '0'
+          value_type: TEXT
+          description: 'Full cert.sh-compatible JSON array for all monitored domains.'
+          tags:
+            - tag: component
+              value: tls
+      discovery_rules:
+        - uuid: c5a9ac9096af441d93e19e5576fb8638
+          name: 'TLS domain discovery'
+          type: ZABBIX_ACTIVE
+          key: tls.certs.discovery
+          delay: 1h
+          description: 'Discovers monitored domains from check_certs.py --discovery.'
+          item_prototypes:
+            - uuid: 73a2b443343d4116b348da23e4b55c79
+              name: 'Cert status: {#DOMAIN}'
+              type: DEPENDENT
+              key: 'tls.cert.status[{#DOMAIN}]'
+              value_type: TEXT
+              description: 'OK | WARNING | ERROR'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.domain=="{#DOMAIN}")].status.first()'
+              master_item:
+                key: tls.certs.raw
+              tags:
+                - tag: domain
+                  value: '{#DOMAIN}'
+            - uuid: ac876e805da149219a0eb99262c9c732
+              name: 'Cert days left: {#DOMAIN}'
+              type: DEPENDENT
+              key: 'tls.cert.days_left[{#DOMAIN}]'
+              value_type: FLOAT
+              units: days
+              description: 'Whole days until expiry (-1 on error).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.domain=="{#DOMAIN}")].days_left.first()'
+              master_item:
+                key: tls.certs.raw
+              tags:
+                - tag: domain
+                  value: '{#DOMAIN}'
+            - uuid: a2a1626d547448088ca85d85e9055d30
+              name: 'Cert expires: {#DOMAIN}'
+              type: DEPENDENT
+              key: 'tls.cert.expires[{#DOMAIN}]'
+              value_type: TEXT
+              description: 'Expiry timestamp (ISO 8601, empty on error).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.domain=="{#DOMAIN}")].expires.first()'
+              master_item:
+                key: tls.certs.raw
+              tags:
+                - tag: domain
+                  value: '{#DOMAIN}'
+          trigger_prototypes:
+            - uuid: c8af88bd5d65459da30623296ccca0f5
+              expression: 'last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])="ERROR"'
+              name: 'TLS check failed for {#DOMAIN}'
+              priority: HIGH
+              description: 'The certificate check errored (unreachable / no cert / parse failure).'
+              tags:
+                - tag: domain
+                  value: '{#DOMAIN}'
+            - uuid: 629111496f324f3484f6831a55700df6
+              expression: 'last(/TLS Monitor by Zabbix agent active/tls.cert.status[{#DOMAIN}])="WARNING"'
+              name: 'TLS certificate expiring soon for {#DOMAIN}'
+              priority: WARNING
+              description: 'Certificate is within WARNING_DAYS of expiry (or already expired).'
+              tags:
+                - tag: domain
+                  value: '{#DOMAIN}'

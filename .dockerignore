@@ -1,0 +1,17 @@
+# Keep the build context minimal and free of local data / secrets.
+.git
+.github
+README.md
+cert.sh
+domains.txt
+domains.local.txt
+
+# Environment-specific config and any env files must never enter the image.
+example/
+.env
+*.env
+**/.env
+
+__pycache__/
+*.pyc
+.DS_Store
